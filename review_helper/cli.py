@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
 import sys
 from collections import defaultdict
 
@@ -12,7 +11,8 @@ from review_helper import __version__
 from review_helper.chrome import ChromeCliError, close_tab, list_tabs
 from review_helper.pr_urls import PullRequestRef, parse_pr_url, tab_keep_score
 from review_helper.progress import iterate_with_progress, status as log_status
-from review_helper.review_batch import check_reviews
+from review_helper.git_config import all_gitconfig_values
+from review_helper.review_batch import check_pr_statuses
 
 PR_AUTHOR_RE = re.compile(r" by ([^·]+?) · Pull Request ", re.IGNORECASE)
 
@@ -32,17 +32,6 @@ def _identity_tokens(git_name: str | None, git_email: str | None) -> set[str]:
         tokens.add(local)
         tokens.update(_split_name(local))
     return {t for t in tokens if len(t) >= 4}
-
-
-def _git_config(key: str) -> str | None:
-    result = subprocess.run(
-        ["git", "config", key],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    value = (result.stdout or "").strip()
-    return value or None
 
 
 def _author_names_from_tabs(prs: list[PullRequestRef]) -> list[str]:
@@ -71,20 +60,24 @@ def _related_names(prs: list[PullRequestRef], tokens: set[str]) -> list[str]:
 
 def _reviewer_names(args: argparse.Namespace, prs: list[PullRequestRef]) -> list[str]:
     names: list[str] = []
-    git_name = _git_config("user.name")
-    git_email = _git_config("user.email")
+    git_names = all_gitconfig_values("user.name")
+    git_emails = all_gitconfig_values("user.email")
 
     if args.reviewer:
         names.extend(args.reviewer)
     else:
-        if git_name:
-            names.append(git_name)
-        if git_email and "@" in git_email:
-            names.append(git_email.split("@", 1)[0])
-        github_user = _git_config("github.user")
-        if github_user:
+        names.extend(git_names)
+        for git_email in git_emails:
+            if "@" in git_email:
+                names.append(git_email.split("@", 1)[0])
+        for github_user in all_gitconfig_values("github.user"):
             names.append(github_user)
-        names.extend(_related_names(prs, _identity_tokens(git_name, git_email)))
+        tokens: set[str] = set()
+        for git_name in git_names:
+            tokens.update(_identity_tokens(git_name, None))
+        for git_email in git_emails:
+            tokens.update(_identity_tokens(None, git_email))
+        names.extend(_related_names(prs, tokens))
 
     seen: set[str] = set()
     unique: list[str] = []
@@ -143,13 +136,28 @@ def _group_tabs_by_pr(
     return grouped
 
 
+def _print_sections(
+    prs: list[PullRequestRef],
+    sections: list[tuple[str, set[str]]],
+) -> list[str]:
+    tabs_to_close: list[str] = []
+    printed = False
+    for heading, tab_ids in sections:
+        grouped = _group_tabs_by_pr(prs, tab_ids)
+        if not grouped:
+            continue
+        if printed:
+            print()
+        tabs_to_close.extend(_print_section(heading, grouped))
+        printed = True
+    return tabs_to_close
+
+
 def _print_section(
     heading: str,
     grouped: list[tuple[PullRequestRef, list[PullRequestRef]]],
 ) -> list[str]:
     tab_ids: list[str] = []
-    if not grouped:
-        return tab_ids
     print(f"{heading} ({sum(len(tabs) for _, tabs in grouped)} tab(s)):")
     for representative, tabs in grouped:
         print(f"  {_format_pr(representative)}")
@@ -160,8 +168,9 @@ def _print_section(
 
 
 def _close_tabs(tab_ids: list[str]) -> None:
+    unique_ids = sorted(set(tab_ids), key=int, reverse=True)
     for tab_id in iterate_with_progress(
-        sorted(tab_ids, key=int),
+        unique_ids,
         desc="Closing tabs",
         unit="tab",
     ):
@@ -176,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="review-helper",
         description=(
             "Find GitHub/GitLab PR tabs in Chrome, close duplicates, "
-            "and close PRs you have already reviewed."
+            "merged PRs, and PRs you have already reviewed."
         ),
     )
     parser.add_argument(
@@ -196,7 +205,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dedupe-only",
         action="store_true",
-        help="Only close duplicate PR tabs; skip review-status checks",
+        help="Only close duplicate and merged PR tabs; skip review-status checks",
+    )
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Check PR status one at a time instead of in parallel",
     )
     parser.add_argument(
         "--version",
@@ -221,50 +235,61 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     reviewer_names = _reviewer_names(args, prs)
-    if not reviewer_names:
+    if not reviewer_names and not args.dedupe_only:
         print(
             "No reviewer name found. Set git config user.name or pass --reviewer.",
             file=sys.stderr,
         )
         return 1
 
-    duplicate_tab_ids, kept_by_key = _dedupe_tabs(prs)
-    log_status(f"Found {len(prs)} PR/MR tab(s), {len(kept_by_key)} unique")
+    if reviewer_names:
+        log_status(f"Reviewers: {', '.join(reviewer_names)}")
+
+    duplicate_tab_ids, _kept_by_key = _dedupe_tabs(prs)
+    log_status(f"Found {len(prs)} PR/MR tab(s), {len(_kept_by_key)} unique")
     duplicate_ids = set(duplicate_tab_ids)
     reviewed_ids: set[str] = set()
+    merged_ids: set[str] = set()
 
-    if not args.dedupe_only:
-        try:
-            review_status = check_reviews(kept_by_key, reviewer_names)
-        except Exception as exc:
-            print(f"Lightpanda error: {exc}", file=sys.stderr)
-            review_status = {}
+    names_for_check = [] if args.dedupe_only else reviewer_names
+    try:
+        pr_status = check_pr_statuses(
+            prs,
+            names_for_check,
+            parallel=not args.no_parallel,
+        )
+    except Exception as exc:
+        print(f"Lightpanda error: {exc}", file=sys.stderr)
+        pr_status = {}
 
-        reviewed_keys: set[tuple] = set()
-        for key, status in review_status.items():
-            if status.reviewed:
-                reviewed_keys.add(key)
+    merged_keys: set[tuple] = set()
+    reviewed_keys: set[tuple] = set()
+    for key, status in pr_status.items():
+        if status.merged:
+            merged_keys.add(key)
+        elif status.reviewed:
+            reviewed_keys.add(key)
 
-        for pr in prs:
-            if pr.key in reviewed_keys:
-                reviewed_ids.add(pr.tab_id)
-                duplicate_ids.discard(pr.tab_id)
+    for pr in prs:
+        if pr.key in merged_keys:
+            merged_ids.add(pr.tab_id)
+        elif pr.key in reviewed_keys:
+            reviewed_ids.add(pr.tab_id)
 
-    if not duplicate_ids and not reviewed_ids:
+    duplicate_ids -= merged_ids
+    duplicate_ids -= reviewed_ids
+
+    if not duplicate_ids and not reviewed_ids and not merged_ids:
         log_status("Nothing to close.")
         return 0
 
-    tabs_to_close: list[str] = []
-    tabs_to_close.extend(
-        _print_section("Duplicates", _group_tabs_by_pr(prs, duplicate_ids))
-    )
-    if duplicate_ids and reviewed_ids:
-        print()
-    tabs_to_close.extend(
-        _print_section(
-            "Already reviewed",
-            _group_tabs_by_pr(prs, reviewed_ids),
-        )
+    tabs_to_close = _print_sections(
+        prs,
+        [
+            ("Duplicates", duplicate_ids),
+            ("Merged", merged_ids),
+            ("Already reviewed", reviewed_ids),
+        ],
     )
 
     if not args.dry_run and tabs_to_close:

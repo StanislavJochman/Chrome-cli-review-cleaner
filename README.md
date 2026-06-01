@@ -38,7 +38,7 @@ review-helper
 If your GitHub username differs from `git config user.name`:
 
 ```bash
-review-helper --reviewer StanleyJochman --reviewer StanislavJochman
+review-helper --reviewer CustomUsername --reviewer custom_username
 ```
 
 Only deduplicate:
