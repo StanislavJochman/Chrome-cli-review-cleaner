@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "review-helper"
 version = "0.3.0"
-description = "Close duplicate and already-reviewed PR tabs in Chrome using chrome-cli and Lightpanda"
+description = "Chrome review CLI cleaner — close duplicate, merged, and already-reviewed PR tabs"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

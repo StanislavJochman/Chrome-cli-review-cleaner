@@ -16,7 +16,8 @@ def _chrome_cli_path() -> str:
     path = shutil.which("chrome-cli")
     if not path:
         raise ChromeCliError(
-            "chrome-cli not found. Install with: brew install chrome-cli"
+            "chrome-cli not found. macOS: brew install chrome-cli "
+            "(see README for Fedora notes)"
         )
     return path
 

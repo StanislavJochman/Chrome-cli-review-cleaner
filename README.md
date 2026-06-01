@@ -1,15 +1,45 @@
-# review-helper
+# Chrome review CLI cleaner
 
-Close duplicate and already-reviewed GitHub/GitLab PR tabs in Chrome.
+![Dozens of open GitHub and GitLab PR tabs in Chrome](docs/pr-tabs.png)
+
+If you review pull requests regularly, your browser probably looks like this — a row of GitHub and GitLab tabs with no room left for titles. The same PR open twice, a `/changes` view next to the main page, tabs for PRs you approved last week, and tabs for PRs that already merged.
+
+**Chrome review CLI cleaner** cleans that up in one command. It scans your open Chrome tabs, finds GitHub and GitLab PR/MR URLs (including self-hosted instances), checks whether each PR is merged or already reviewed by you, and closes the tabs you no longer need.
 
 - **chrome-cli** — list and close tabs in your running Chrome
 - **Lightpanda** (`lightpanda-py`) — fast headless scraping of PR review status
 
 ## Requirements
 
-- macOS with Google Chrome
-- [chrome-cli](https://github.com/prasmussen/chrome-cli): `brew install chrome-cli`
+- Google Chrome or a Chromium-based browser
 - Python 3.10+
+- [chrome-cli](https://github.com/prasmussen/chrome-cli) for tab control (macOS)
+
+### macOS
+
+Install Chrome and chrome-cli:
+
+```bash
+brew install chrome-cli
+```
+
+Using Brave, Edge, or another Chromium browser? Set `CHROME_BUNDLE_IDENTIFIER` (see [Environment](#environment)).
+
+### Fedora
+
+Install Chrome and Python:
+
+```bash
+# Google Chrome (recommended)
+sudo dnf install fedora-workstation-repositories
+sudo dnf config-manager --set-enabled google-chrome
+sudo dnf install google-chrome-stable python3 python3-pip
+
+# Or Chromium from Fedora repos
+sudo dnf install chromium python3 python3-pip
+```
+
+Tab control uses [chrome-cli](https://github.com/prasmussen/chrome-cli), which relies on macOS Scripting Bridge and runs on **macOS only**. Install and run `review-helper` on a Mac to list and close tabs. The Python package and Lightpanda scraping work on Fedora for development and testing.
 
 ## Install
 
@@ -19,7 +49,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Lightpanda's browser binary is bundled in `lightpanda-py`. No other browser install needed.
+Lightpanda's browser binary is bundled in `lightpanda-py`. No other browser install is needed for scraping.
 
 ## Usage
 
@@ -41,24 +71,32 @@ If your GitHub username differs from `git config user.name`:
 review-helper --reviewer CustomUsername --reviewer custom_username
 ```
 
-Only deduplicate:
+Only deduplicate (skip review checks):
 
 ```bash
 review-helper --dedupe-only
 ```
 
-Output lists only duplicate and already-reviewed PRs being closed.
+Serial mode (useful when many tabs fail to load in parallel):
+
+```bash
+review-helper --no-parallel
+```
+
+Output lists PRs being closed, grouped by duplicates, merged, and already reviewed.
 
 ## What it does
 
 1. Lists Chrome tabs via `chrome-cli`
-2. Finds GitHub/GitLab PRs (including self-hosted)
-3. Closes duplicate tabs, keeping one per PR number
-4. Scrapes each unique PR with Lightpanda to detect if you already reviewed it
-5. Closes all tabs for reviewed PRs
+2. Finds GitHub/GitLab PRs and MRs (including self-hosted)
+3. Closes duplicate tabs, keeping the best URL per PR
+4. Scrapes each unique PR with Lightpanda to detect merged or already-reviewed status
+5. Closes all tabs for merged and reviewed PRs
 
-Private repos that require login cannot be scraped by Lightpanda and are skipped silently.
+Reviewer names come from all `~/.gitconfig*` files (`user.name`, `user.email`, `github.user`).
+
+Private repos that require login cannot be scraped by Lightpanda and are left open.
 
 ## Environment
 
-- `CHROME_BUNDLE_IDENTIFIER` — non-Chrome browser (e.g. `com.brave.Browser`)
+- `CHROME_BUNDLE_IDENTIFIER` — non-Chrome Chromium browser on macOS (e.g. `com.brave.Browser`)
