@@ -47,11 +47,12 @@ def map_with_progress(
     unit: str = "it",
     label: Callable[[T], str] | None = None,
     parallel: bool = True,
+    max_workers: int | None = None,
 ) -> list[R]:
     if not items:
         return []
 
-    workers = 1 if not parallel else default_workers(len(items))
+    workers = 1 if not parallel else (max_workers or default_workers(len(items)))
     if workers == 1:
         if _use_progress():
             results: list[R] = []

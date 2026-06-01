@@ -20,6 +20,13 @@ LOGIN_HINTS = (
     "you must be logged in",
 )
 
+RATE_LIMIT_HINTS = (
+    "rate limit",
+    "access has been restricted",
+    "too many requests",
+    "please wait a few minutes",
+)
+
 REVIEW_URL_MARKERS = (
     "#pullrequestreview-",
     "#discussion_r",
@@ -35,9 +42,19 @@ REVIEW_MARKERS = (
     "reviewed",
 )
 
+REVIEW_REQUESTED_MARKERS = (
+    "awaiting review from",
+    "awaiting requested review from",
+    "review requested from",
+    "requested your review",
+    "your review was requested",
+    "review requested",
+)
+
 MERGED_MARKERS = {
     "github": (
         " merged this pull request",
+        "merged 1 commit into",
         "was merged",
         "successfully merged and closed",
         "pull request successfully merged",
@@ -51,6 +68,16 @@ MERGED_MARKERS = {
         "status: merged",
     ),
 }
+
+STRONG_MERGED_MARKERS = (
+    " merged this pull request",
+    " merged this merge request",
+    "merged 1 commit into",
+    "pull request successfully merged",
+    "successfully merged and closed",
+    "merge request was merged",
+    "** merged **",
+)
 
 NOT_MERGED_MARKERS = (
     "ready to merge",
@@ -101,6 +128,49 @@ def _name_matches_review(text: str, names: list[str]) -> bool:
     return False
 
 
+def platform_for_url(url: str) -> str:
+    if "/-/merge_requests/" in url:
+        return "gitlab"
+    return "github"
+
+
+def name_matches_review_requested(text: str, names: list[str]) -> bool:
+    if not names:
+        return False
+    lower = text.lower()
+    for name in names:
+        nl = name.lower()
+        start = 0
+        while True:
+            idx = lower.find(nl, start)
+            if idx == -1:
+                break
+            snippet = lower[max(0, idx - 80) : idx + 180]
+            start = idx + 1
+            if any(marker in snippet for marker in REVIEW_REQUESTED_MARKERS):
+                return True
+    return False
+
+
+def pr_needs_user_review(url: str, reviewer_names: list[str]) -> bool:
+    platform = platform_for_url(url)
+    for wait_ms in (FETCH_WAIT_MS, FETCH_RETRY_WAIT_MS):
+        text = _fetch_page_text(url, wait_ms=wait_ms)
+        if not text or _looks_like_login_page(text):
+            continue
+        if looks_like_rate_limit(text):
+            return False
+        if _is_merged_text(text, platform):
+            return False
+        if _name_matches_review(text, reviewer_names):
+            return False
+        if name_matches_review_requested(text, reviewer_names):
+            return True
+        if _page_looks_complete(text, platform):
+            return False
+    return False
+
+
 def _is_merged_title(title: str, platform: str) -> bool:
     lower = title.lower()
     if platform == "github":
@@ -112,6 +182,8 @@ def _is_merged_title(title: str, platform: str) -> bool:
 
 def _is_merged_text(text: str, platform: str) -> bool:
     lower = text.lower()
+    if any(marker in lower for marker in STRONG_MERGED_MARKERS):
+        return True
     if any(marker in lower for marker in NOT_MERGED_MARKERS):
         return False
     return any(marker in lower for marker in MERGED_MARKERS.get(platform, ()))
@@ -120,6 +192,11 @@ def _is_merged_text(text: str, platform: str) -> bool:
 def _looks_like_login_page(text: str) -> bool:
     lower = text.lower()
     return any(hint in lower for hint in LOGIN_HINTS)
+
+
+def looks_like_rate_limit(text: str) -> bool:
+    lower = text.lower()
+    return any(hint in lower for hint in RATE_LIMIT_HINTS)
 
 
 def _text_from_html(page_html: str) -> str:
@@ -139,12 +216,19 @@ def _text_from_html(page_html: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def fetch_page_text(url: str, *, wait_ms: int) -> str:
+    return _fetch_page_text(url, wait_ms=wait_ms)
+
+
 def _fetch_page_text(url: str, *, wait_ms: int) -> str:
     with _FETCH_SEM:
         for dump in ("markdown", "html"):
             try:
                 response = lightpanda.fetch(url, dump=dump, wait_ms=wait_ms)
-                text = response.text if dump == "markdown" else _text_from_html(response.text)
+                raw = response.text
+                if looks_like_rate_limit(raw):
+                    return raw
+                text = raw if dump == "markdown" else _text_from_html(raw)
                 if len(text) > 500:
                     return text
             except Exception:

@@ -8,8 +8,9 @@ import sys
 from collections import defaultdict
 
 from review_helper import __version__
-from review_helper.chrome import ChromeCliError, close_tab, list_tabs
-from review_helper.pr_urls import PullRequestRef, parse_pr_url, tab_keep_score
+from review_helper.chrome import ChromeCliError, close_tab, list_tabs, open_tab
+from review_helper.my_reviews import collect_prs_to_open, normalize_listing_url
+from review_helper.pr_urls import PullRequestRef, parse_pr_url, tab_keep_score, tab_url_key
 from review_helper.progress import iterate_with_progress, status as log_status
 from review_helper.git_config import all_gitconfig_values
 from review_helper.review_batch import check_pr_statuses
@@ -58,7 +59,10 @@ def _related_names(prs: list[PullRequestRef], tokens: set[str]) -> list[str]:
     return related
 
 
-def _reviewer_names(args: argparse.Namespace, prs: list[PullRequestRef]) -> list[str]:
+def _reviewer_names(
+    args: argparse.Namespace,
+    prs: list[PullRequestRef] | None = None,
+) -> list[str]:
     names: list[str] = []
     git_names = all_gitconfig_values("user.name")
     git_emails = all_gitconfig_values("user.email")
@@ -77,7 +81,8 @@ def _reviewer_names(args: argparse.Namespace, prs: list[PullRequestRef]) -> list
             tokens.update(_identity_tokens(git_name, None))
         for git_email in git_emails:
             tokens.update(_identity_tokens(None, git_email))
-        names.extend(_related_names(prs, tokens))
+        if prs:
+            names.extend(_related_names(prs, tokens))
 
     seen: set[str] = set()
     unique: list[str] = []
@@ -180,6 +185,104 @@ def _close_tabs(tab_ids: list[str]) -> None:
             log_status(f"Failed to close tab {tab_id}: {exc}")
 
 
+def _open_tabs(urls: list[str]) -> None:
+    for url in iterate_with_progress(
+        urls,
+        desc="Opening tabs",
+        unit="tab",
+    ):
+        try:
+            open_tab(url)
+        except ChromeCliError as exc:
+            log_status(f"Failed to open tab {url}: {exc}")
+
+
+def _listing_url_from_args(args: argparse.Namespace) -> str | None:
+    url = (args.my_reviews or "").strip()
+    if url:
+        return url
+    if sys.stdin.isatty():
+        return input("Public pulls listing URL: ").strip() or None
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    return line.strip() or None
+
+
+def _run_my_reviews(args: argparse.Namespace) -> int:
+    listing_url = _listing_url_from_args(args)
+    if not listing_url:
+        print("Error: No listing URL provided.", file=sys.stderr)
+        return 1
+
+    normalized = normalize_listing_url(listing_url)
+    if normalized != listing_url.rstrip("/"):
+        log_status(f"Using pulls listing: {normalized}")
+    listing_url = normalized
+
+    reviewer_names = _reviewer_names(args, None)
+    if not reviewer_names:
+        print(
+            "No reviewer name found. Set git config user.name or pass --reviewer.",
+            file=sys.stderr,
+        )
+        return 1
+
+    log_status(f"Reviewers: {', '.join(reviewer_names)}")
+    log_status(f"Fetching PR listing: {listing_url}")
+
+    try:
+        pr_urls, fetch_error, pages_fetched, listed_count = collect_prs_to_open(
+            listing_url,
+            reviewer_names,
+            parallel=not args.no_parallel,
+        )
+    except Exception as exc:
+        print(f"Lightpanda error: {exc}", file=sys.stderr)
+        return 1
+
+    if fetch_error:
+        print(f"Error: {fetch_error}", file=sys.stderr)
+        return 1
+
+    if listed_count:
+        log_status(
+            f"Listed {listed_count} open PR(s) from {pages_fetched} page(s)."
+        )
+
+    if not pr_urls:
+        log_status("No open PRs need your review on that listing.")
+        return 0
+
+    try:
+        open_keys = {tab_url_key(tab.url) for tab in list_tabs()}
+    except ChromeCliError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    to_open = [url for url in pr_urls if tab_url_key(url) not in open_keys]
+    skipped = len(pr_urls) - len(to_open)
+
+    print(f"Need review ({len(pr_urls)}):")
+    for url in pr_urls:
+        suffix = " (already open)" if tab_url_key(url) in open_keys else ""
+        print(f"  {url}{suffix}")
+
+    if skipped:
+        log_status(f"Skipping {skipped} already-open tab(s).")
+
+    if not to_open:
+        log_status("Nothing to open.")
+        return 0
+
+    if args.dry_run:
+        log_status(f"Would open {len(to_open)} tab(s).")
+        return 0
+
+    _open_tabs(to_open)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="review-helper",
@@ -213,6 +316,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check PR status one at a time instead of in parallel",
     )
     parser.add_argument(
+        "--my-reviews",
+        metavar="URL",
+        nargs="?",
+        const="",
+        help=(
+            "Open PRs/MRs from a public pulls listing that still need your review; "
+            "prompts for URL when omitted"
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -222,6 +335,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.my_reviews is not None:
+        return _run_my_reviews(args)
 
     try:
         log_status("Scanning Chrome tabs...")

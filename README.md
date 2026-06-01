@@ -83,6 +83,22 @@ Serial mode (useful when many tabs fail to load in parallel):
 review-helper --no-parallel
 ```
 
+Open PRs from a public repo listing that still need your review:
+
+```bash
+review-helper --my-reviews
+# Public pulls listing URL: https://github.com/konflux-ci/konflux-ui/
+
+review-helper --my-reviews https://github.com/konflux-ci/konflux-ui/pulls
+review-helper --dry-run --my-reviews
+```
+
+You can paste a repo URL (`https://github.com/org/repo/`) or a pulls page — repo URLs are automatically converted to `/pulls`.
+
+Lightpanda fetches the listing and each PR page, keeps only those where you are a requested reviewer and have not reviewed yet, then opens them in Chrome.
+
+Works with GitHub review-requested pages and GitLab merge-request dashboards filtered by `reviewer_username`.
+
 Output lists PRs being closed, grouped by duplicates, merged, and already reviewed.
 
 ## What it does
