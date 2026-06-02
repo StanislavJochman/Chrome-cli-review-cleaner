@@ -4,7 +4,7 @@
 
 If you review pull requests regularly, your browser probably looks like this — a row of GitHub and GitLab tabs with no room left for titles. The same PR open twice, a `/changes` view next to the main page, tabs for PRs you approved last week, and tabs for PRs that already merged.
 
-**Chrome review CLI cleaner** cleans that up in one command. It scans your open Chrome tabs, finds GitHub and GitLab PR/MR URLs (including self-hosted instances), checks whether each PR is merged or already reviewed by you, and closes the tabs you no longer need.
+**Chrome review CLI cleaner** cleans that up in one command. It scans your open Chrome tabs, finds GitHub and GitLab PR/MR URLs (including self-hosted instances), checks whether each PR is merged, closed, or already reviewed by you, and closes the tabs you no longer need.
 
 - **chrome-cli** — list and close tabs in your running Chrome
 - **Lightpanda** (`lightpanda-py`) — fast headless scraping of PR review status
@@ -99,15 +99,15 @@ Lightpanda fetches the listing and each PR page, keeps only those where you are 
 
 Works with GitHub review-requested pages and GitLab merge-request dashboards filtered by `reviewer_username`.
 
-Output lists PRs being closed, grouped by duplicates, merged, and already reviewed.
+Output lists PRs being closed, grouped by duplicates, merged, closed, and already reviewed.
 
 ## What it does
 
 1. Lists Chrome tabs via `chrome-cli`
 2. Finds GitHub/GitLab PRs and MRs (including self-hosted)
 3. Closes duplicate tabs, keeping the best URL per PR
-4. Scrapes each unique PR with Lightpanda to detect merged or already-reviewed status
-5. Closes all tabs for merged and reviewed PRs
+4. Scrapes each unique PR with Lightpanda to detect merged, closed, or already-reviewed status
+5. Closes all tabs for merged, closed, and reviewed PRs
 
 Reviewer names come from all `~/.gitconfig*` files (`user.name`, `user.email`, `github.user`).
 

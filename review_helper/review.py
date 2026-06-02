@@ -33,13 +33,21 @@ REVIEW_URL_MARKERS = (
     "#note_",
 )
 
-REVIEW_MARKERS = (
+REVIEW_ACTION_MARKERS = (
     "approved these changes",
     "requested changes",
     "left review comments",
     "approved this merge request",
-    "approved by",
-    "reviewed",
+)
+
+GITHUB_STATE_AFTER_NUMBER_RE = re.compile(
+    r"#\d+\s*\n+(open|closed|draft|merged)\b",
+    re.IGNORECASE,
+)
+
+GITLAB_STATE_RE = re.compile(
+    r"status:\s*(open|closed|merged|draft)\b",
+    re.IGNORECASE,
 )
 
 REVIEW_REQUESTED_MARKERS = (
@@ -79,6 +87,34 @@ STRONG_MERGED_MARKERS = (
     "** merged **",
 )
 
+CLOSED_MARKERS = {
+    "github": (
+        " closed this pull request",
+        "this pull request was closed",
+        "pull request was closed",
+        "closed without merging",
+        "closed this without merging",
+        "** closed **",
+    ),
+    "gitlab": (
+        "closed the merge request",
+        "merge request was closed",
+        "status: closed",
+        "** closed **",
+    ),
+}
+
+STRONG_CLOSED_MARKERS = (
+    " closed this pull request",
+    " closed this merge request",
+    " closed this",
+    "closed this without merging",
+    "closed the merge request",
+    "merge request was closed",
+    "this pull request was closed",
+    "** closed **",
+)
+
 NOT_MERGED_MARKERS = (
     "ready to merge",
     "can be merged",
@@ -105,7 +141,23 @@ OPEN_MARKERS = (
 class PrStatus:
     reviewed: bool = False
     merged: bool = False
+    closed: bool = False
+    draft: bool = False
     detail: str = ""
+
+
+def _pr_state_from_text(text: str, platform: str) -> str | None:
+    """Return open, closed, draft, or merged from the PR/MR state badge when present."""
+    header = text[:8000]
+    if platform == "github":
+        match = GITHUB_STATE_AFTER_NUMBER_RE.search(header)
+        if match:
+            return match.group(1).lower()
+    elif platform == "gitlab":
+        match = GITLAB_STATE_RE.search(header)
+        if match:
+            return match.group(1).lower()
+    return None
 
 
 def _name_matches_review(text: str, names: list[str]) -> bool:
@@ -113,17 +165,12 @@ def _name_matches_review(text: str, names: list[str]) -> bool:
         return False
     lower = text.lower()
     for name in names:
-        nl = name.lower()
-        start = 0
-        while True:
-            idx = lower.find(nl, start)
-            if idx == -1:
-                break
-            snippet = lower[idx : idx + 160]
-            start = idx + 1
-            if "awaiting requested review" in snippet or "awaiting review" in snippet:
-                continue
-            if any(marker in snippet for marker in REVIEW_MARKERS):
+        nl = re.escape(name.lower())
+        actor = rf"(?:\*\*{nl}\*\*|{nl})"
+        if re.search(rf"{actor}\s+reviewed\b", lower):
+            return True
+        for marker in REVIEW_ACTION_MARKERS:
+            if re.search(rf"{actor}\s+{re.escape(marker)}", lower):
                 return True
     return False
 
@@ -162,6 +209,11 @@ def pr_needs_user_review(url: str, reviewer_names: list[str]) -> bool:
             return False
         if _is_merged_text(text, platform):
             return False
+        if _is_closed_text(text, platform):
+            return False
+        state = _pr_state_from_text(text, platform)
+        if state == "draft":
+            return False
         if _name_matches_review(text, reviewer_names):
             return False
         if name_matches_review_requested(text, reviewer_names):
@@ -187,6 +239,33 @@ def _is_merged_text(text: str, platform: str) -> bool:
     if any(marker in lower for marker in NOT_MERGED_MARKERS):
         return False
     return any(marker in lower for marker in MERGED_MARKERS.get(platform, ()))
+
+
+def _is_closed_title(title: str, platform: str) -> bool:
+    if _is_merged_title(title, platform):
+        return False
+    lower = title.lower()
+    if platform == "github":
+        return "· closed" in lower or lower.startswith("closed ")
+    if platform == "gitlab":
+        return "closed" in lower and "merge request" in lower
+    return False
+
+
+def _is_closed_text(text: str, platform: str) -> bool:
+    state = _pr_state_from_text(text, platform)
+    if state == "open":
+        return False
+    if state == "closed":
+        return True
+    if _is_merged_text(text, platform):
+        return False
+    lower = text.lower()
+    if any(marker in lower for marker in STRONG_CLOSED_MARKERS):
+        return True
+    if any(marker in lower for marker in NOT_MERGED_MARKERS):
+        return False
+    return any(marker in lower for marker in CLOSED_MARKERS.get(platform, ()))
 
 
 def _looks_like_login_page(text: str) -> bool:
@@ -251,8 +330,9 @@ def _urls_to_check(tabs: list[PullRequestRef]) -> list[str]:
             scored.append((score - 1, normalized))
 
     for tab in tabs:
-        add(tab.canonical_url, 10)
-        add(tab.url, 20 if any(m in tab.url for m in REVIEW_URL_MARKERS) else 15)
+        add(tab.canonical_url, 20)
+        review_url = any(m in tab.url for m in REVIEW_URL_MARKERS)
+        add(tab.url, 12 if review_url else 15)
 
     scored.sort(key=lambda item: item[0], reverse=True)
     return [url for _, url in scored]
@@ -275,10 +355,23 @@ def _status_from_text(text: str, platform: str, reviewer_names: list[str]) -> Pr
     if _looks_like_login_page(text):
         return PrStatus(detail="login-required")
 
-    reviewed = _name_matches_review(text, reviewer_names)
+    state = _pr_state_from_text(text, platform)
+    if state == "merged":
+        return PrStatus(merged=True)
+    if state == "closed":
+        return PrStatus(closed=True)
+    if state == "draft":
+        return PrStatus(draft=True)
+
     merged = _is_merged_text(text, platform)
-    if reviewed or merged:
-        return PrStatus(reviewed=reviewed, merged=merged)
+    if merged:
+        return PrStatus(merged=True)
+    closed = _is_closed_text(text, platform)
+    if closed:
+        return PrStatus(closed=True)
+    reviewed = _name_matches_review(text, reviewer_names)
+    if reviewed:
+        return PrStatus(reviewed=True)
 
     if _page_looks_complete(text, platform):
         return PrStatus()
@@ -299,11 +392,22 @@ def check_pr_url(
         text = _fetch_page_text(url, wait_ms=wait_ms)
         status = _status_from_text(text, platform, reviewer_names)
         last = status
-        if status.reviewed or status.merged or status.detail == "login-required":
+        if status.merged or status.closed or status.draft or status.reviewed:
             return status
-        if not status.detail:
+        if status.detail == "login-required":
             return status
     return last
+
+
+def _is_draft_title(title: str, platform: str) -> bool:
+    if _is_merged_title(title, platform) or _is_closed_title(title, platform):
+        return False
+    lower = title.lower()
+    if platform == "github":
+        return "· draft" in lower or lower.startswith("draft ")
+    if platform == "gitlab":
+        return "draft" in lower and "merge request" in lower
+    return False
 
 
 def check_pr_tabs(
@@ -315,6 +419,10 @@ def check_pr_tabs(
     platform = tabs[0].platform
     if any(_is_merged_title(tab.title, platform) for tab in tabs):
         return PrStatus(merged=True)
+    if any(_is_closed_title(tab.title, platform) for tab in tabs):
+        return PrStatus(closed=True)
+    if any(_is_draft_title(tab.title, platform) for tab in tabs):
+        return PrStatus(draft=True)
 
     last = PrStatus(detail="fetch-failed")
     for url in _urls_to_check(tabs):
@@ -325,9 +433,9 @@ def check_pr_tabs(
             wait_times=wait_times,
         )
         last = status
-        if status.reviewed or status.merged or status.detail == "login-required":
+        if status.merged or status.closed or status.draft or status.reviewed:
             return status
-        if not status.detail:
+        if status.detail == "login-required":
             return status
     return last
 

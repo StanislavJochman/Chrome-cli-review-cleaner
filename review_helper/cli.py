@@ -288,7 +288,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="review-helper",
         description=(
             "Find GitHub/GitLab PR tabs in Chrome, close duplicates, "
-            "merged PRs, and PRs you have already reviewed."
+            "merged, closed, or draft PRs, and PRs you have already reviewed."
         ),
     )
     parser.add_argument(
@@ -308,7 +308,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dedupe-only",
         action="store_true",
-        help="Only close duplicate and merged PR tabs; skip review-status checks",
+        help=(
+            "Only close duplicate, merged, closed, and draft PR tabs; "
+            "skip review-status checks"
+        ),
     )
     parser.add_argument(
         "--no-parallel",
@@ -366,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
     duplicate_ids = set(duplicate_tab_ids)
     reviewed_ids: set[str] = set()
     merged_ids: set[str] = set()
+    closed_ids: set[str] = set()
+    draft_ids: set[str] = set()
 
     names_for_check = [] if args.dedupe_only else reviewer_names
     try:
@@ -379,34 +384,69 @@ def main(argv: list[str] | None = None) -> int:
         pr_status = {}
 
     merged_keys: set[tuple] = set()
+    closed_keys: set[tuple] = set()
+    draft_keys: set[tuple] = set()
     reviewed_keys: set[tuple] = set()
     for key, status in pr_status.items():
         if status.merged:
             merged_keys.add(key)
+        elif status.closed:
+            closed_keys.add(key)
+        elif status.draft:
+            draft_keys.add(key)
         elif status.reviewed:
             reviewed_keys.add(key)
 
     for pr in prs:
         if pr.key in merged_keys:
             merged_ids.add(pr.tab_id)
+        elif pr.key in closed_keys:
+            closed_ids.add(pr.tab_id)
+        elif pr.key in draft_keys:
+            draft_ids.add(pr.tab_id)
         elif pr.key in reviewed_keys:
             reviewed_ids.add(pr.tab_id)
 
     duplicate_ids -= merged_ids
+    duplicate_ids -= closed_ids
+    duplicate_ids -= draft_ids
     duplicate_ids -= reviewed_ids
 
-    if not duplicate_ids and not reviewed_ids and not merged_ids:
+    if (
+        not duplicate_ids
+        and not reviewed_ids
+        and not merged_ids
+        and not closed_ids
+        and not draft_ids
+    ):
         log_status("Nothing to close.")
         return 0
+
+    if args.dry_run:
+        log_status("Dry run — no tabs will be closed.")
 
     tabs_to_close = _print_sections(
         prs,
         [
             ("Duplicates", duplicate_ids),
             ("Merged", merged_ids),
+            ("Closed", closed_ids),
+            ("Draft", draft_ids),
             ("Already reviewed", reviewed_ids),
         ],
     )
+
+    if args.dry_run:
+        if closed_ids:
+            log_status(
+                f"Would close {len(closed_ids)} tab(s) for "
+                f"{len(closed_keys)} closed PR(s)/MR(s)."
+            )
+        if draft_ids:
+            log_status(
+                f"Would close {len(draft_ids)} tab(s) for "
+                f"{len(draft_keys)} draft PR(s)/MR(s)."
+            )
 
     if not args.dry_run and tabs_to_close:
         _close_tabs(tabs_to_close)
